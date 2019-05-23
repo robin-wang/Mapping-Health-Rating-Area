@@ -1,0 +1,540 @@
+---
+title: "HPC Mapping Rating Area Pipeline"
+author: "RWang"
+date: "May 20, 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Urbnthemes
+Need urbnthemes for styling
+Instructions: https://github.com/UrbanInstitute/urban_R_theme
+
+install.packages(c("ggplot2","reshape2","RColorBrewer","extrafont")) may be needed
+
+```{r urbnthemes}
+# source('https://raw.githubusercontent.com/UrbanInstitute/urban_R_theme/master/urban_theme_windows.R')
+library(urbnthemes)
+```
+
+## Libraries
+```{r package}
+library(tidyr)
+#library(plyr)
+library(dplyr)
+library(tidyverse)
+library(sf)
+library(tidycensus)
+library(ggplot2)
+library(here)
+library(readxl)
+library(readr)
+library(readxl)
+library(units)
+library(smoothr)
+library(rmapshaper)
+library(magick)
+
+devtools::install_github("uncoast-unconf/ggcart")
+library(ggcart)
+```
+
+## Census API Input
+Acquire your own API: https://api.census.gov/data/key_signup.html
+TidyCensus: https://cran.r-project.org/web/packages/tidycensus/tidycensus.pdf
+
+```{r API input}
+# census_api_key("99f5c6677acc3649e28ae06f33a5e99a23a688b2",install = TRUE)
+```
+
+## Census API Data
+Bespoke lines needed to address Kusilvak and Oglala, for cross walk with HPC RA level data
+```{r Census Data}
+counties <- tidycensus::get_acs(geography = "county", variables = "B19013_001",
+                                geometry = TRUE) %>% arrange(NAME)
+counties$NAME_orig <- counties$NAME
+
+counties <- counties %>% separate(NAME, into = c("county", "state"),sep="\\,")
+counties$state <- trimws(counties$state, which = c("left"))
+
+# inspect states
+unique(counties$state)
+
+# Remove Puerto Rico
+counties <- counties %>% filter(state != "Puerto Rico")
+# Alaska
+counties$county[counties$GEOID=="02158"] <- "Kusilvak, formerly Wade Hampton 02270"
+# South Dakota
+counties$county[counties$GEOID=="46102"] <- "Oglala Lakota County, formerly Shannon 46113"
+
+unique(counties$state)
+length(unique(counties$state))
+
+
+# State Data, used only for Alaska Cropping
+states <- tidycensus::get_acs(geography = "state", variables = "B19013_001",
+                                geometry = TRUE) %>% arrange(NAME)
+states <- states %>% filter(NAME != "Puerto Rico")
+```
+
+## Set-up All Counties
+Not fetching for VT, RI, NJ, HI, DC, DE; with only one rating area in state
+(https://www.cms.gov/cciio/programs-and-initiatives/health-insurance-market-reforms/state-gra.html)
+Need to take care of California, Nebraska, Massachusetts and Alaska separately
+
+```{r Set-up All Counties}
+# Only 1
+only1 <- c("Vermont","Rhode Island","New Jersey","Hawaii",
+           "District of Columbia","Delaware","New Hampshire")
+
+only1data_factory <- function(df,name) {
+  statedata <- df %>% filter(state == name)
+  group1 <- statedata$GEOID
+  statedata <- statedata %>% mutate(group = case_when(GEOID %in% group1 ~ 'newgroup1',TRUE ~ GEOID))
+  statedata2 <- group_by(statedata, group) %>% summarise(estimate=sum(estimate), do_union = TRUE)
+  statedata_merge <- statedata2 %>% mutate(facet = "merged") %>% dplyr::select("group","estimate","facet","geometry")
+  statedata_unmerge <- statedata %>% dplyr::select(group,estimate) %>% mutate(facet = "unmerge")
+  statedata_output <- rbind(statedata_merge, statedata_unmerge)
+  statedata_output$ratingarea <- 1
+  statedata_output$state <- name
+  statedata_output <- statedata_output %>% dplyr::select(-c("group"))
+  statedata_output <- statedata_output[c("state","ratingarea","facet","estimate","geometry")]
+  statedata_output$ratingarea <- as.factor(statedata_output$ratingarea)
+  return(statedata_output)
+  }
+
+# Examine how many counties there are for benchmarking
+other <- filter(counties,!(state %in% only1))["state"]
+other <- unique(other$state)
+other
+
+county_counteur <- function(df,name) {
+  statedata <- df %>% filter(state == name)
+  count <- length(unique(statedata$county))
+  return(list(name, count))
+}
+
+othercounties <- filter(counties,!(state %in% only1))
+```
+
+## ESRI shp 3-DIGIT for AK
+3-digit area shapefiles from ESRI, only use for Alaska's boundaries
+```{r AK shapefile ESRI}
+ESRIshp <- st_read("data/SHP3-digitESRI/Export_3DigitShpAK.shp") %>% 
+  dplyr::select(ZIP3,STATE,Shape_Area,geometry)
+ESRIshp <- ESRIshp %>% filter(ZIP3 %in% c("000","995","996","997","998","999"))
+ESRIshp$STATE <- as.character(ESRIshp$STATE)
+ESRIshp$ZIP3 <- as.character(ESRIshp$ZIP3)
+# AK shape, to be used as clipper for 3 digit zip shape file
+AK_state <- states %>% filter(NAME == "Alaska")
+
+ESRIshp_AK <- st_transform(ESRIshp,st_crs(AK_state))
+# st_crs(ESRIshp_AK)
+# st_crs(AK_state)
+ESRIshp_AK <- st_crop(ESRIshp_AK,AK_state)
+colnames(ESRIshp_AK)[1] <- "zip3"
+
+AKzip3_to_RA <- read_excel("data/AKzip3-RA-crosswalk.xlsx")
+# Use left join to preserve large areas in AK without zip code assignment
+AKshp <- left_join(ESRIshp_AK,AKzip3_to_RA,by="zip3") 
+AKshp$STATE <- "AK"
+AKshp <- group_by(AKshp,RA) %>% summarise(estimate=sum(Shape_Area),do_union = TRUE) 
+AKshp$RA <- as.factor(AKshp$RA)
+
+#ggplot() + geom_sf(data = AKshp, aes(fill = RA), color = 'white')
+
+rm(AK_state,AKzip3_to_RA,ESRIshp_AK)
+```
+
+
+## Los Angeles County Shapefile
+RELY ON ARCMAP SHAPEFILES, CONVERT TO R MULTIPOLYGON AND WRANGLE...
+Los Angeles County GIS Data Portal : https://egis3.lacounty.gov/dataportal/2016/08/11/zip-codes-with-parcel-specific-boundaries/
+Reference Zip Code Map in Los Angeles County : http://planning.lacounty.gov/assets/upl/data/map_t06-cities-zip.pdf
+
+Then because of the strange grouping for region 923 & 928 per CMS, we use map from CoveredCA:
+https://hbex.coveredca.com/toolkit/webinars-briefings/downloads/Regional-Staff-FINAL.pdf
+
+```{r shapefile CA LA}
+CALAshp <- 
+  st_read("data/ZipCode_CA_LACounty/CAMS_ZIPCODE_PARCEL_SPECIFIC/CAMS_ZIPCODE_PARCEL_SPECIFIC.shp") %>%
+  dplyr::select(ZIPCODE,OBJECTID,geometry)
+CALAshp$group <- 1
+CALAshp$zip3 <- substr(CALAshp$ZIPCODE,1,3)
+# ggplot() + geom_sf(data = CALAshp, aes(fill = group), color = 'white') + scale_fill_viridis_c()
+
+# Keeping lines below for referencing odd regional assignment, 928 and 923
+# CALAshpmerge <- group_by(CALAshp,zip3) %>% summarise(estimate=sum(group), do_union = TRUE)
+# ggplot() + geom_sf(data = CALAshpmerge, aes(fill = zip3), color = 'white')
+# ggplot() + geom_sf(data = CALAshpmerge, aes(fill = zip3), color = 'white')
+# CALAshpmerge %>% filter(zip3 == "928")%>% ggplot + geom_sf(aes(fill=zip3),color="white")
+# CALAshpmerge %>% filter(zip3 == "923")%>% ggplot + geom_sf(aes(fill=zip3),color="white")
+
+CALAzip3_to_RA <- read_excel("data/CALAzip3-RA-crosswalk.xlsx")
+CALAshp <- merge(CALAshp,CALAzip3_to_RA,by="zip3") 
+CALAshp <- group_by(CALAshp,RA) %>% summarise(estimate=sum(group),do_union = TRUE)
+
+CALAshp1 <- CALAshp
+CALAshp1$state <- "California"
+CALAshp1$do_union <- NULL
+CALAshp1$facet <- "merged"
+colnames(CALAshp1)[1] <- "ratingarea"
+#ggplot() + geom_sf(data = CALAshp1, aes(fill = estimate), color = 'white') + scale_fill_viridis_c()
+rm(CALAzip3_to_RA,CALAshp)
+```
+
+
+## MA Shapefile
+RELY ON ARCMAP SHAPEFILES, CONVERT TO R MULTIPOLYGON AND WRANGLE...
+MASS GIS Pilot Data : https://docs.digital.mass.gov/dataset/massgis-data-zip-codes-5-digit-here-navteq
+
+```{r shapefile}
+MAshp <- 
+  st_read("data/zipcodes_MA/ZIPCODES_NT_POLY.shp") %>% dplyr::select(POSTCODE,PC_NAME,COUNTY,geometry)
+MAshp1585 <- MAshp %>%
+  filter(POSTCODE == "01585") %>% ms_filter_islands(min_area = units::set_units(1,km^2)) %>%
+  drop_crumbs(set_units(5,km^2))
+MAshp <- filter(MAshp,POSTCODE != "01585") %>% rbind(MAshp1585)
+
+MAshp$group <- 1
+MAshp$zip3 <- substr(MAshp$POSTCODE,1,3)
+MAshp$zip3[MAshp$zip3 == "121"] <- "012"
+MAshp2 <- group_by(MAshp,zip3) %>% summarise(estimate=sum(group),do_union = TRUE)
+# ggplot() + geom_sf(data = MAshp2, aes(fill = estimate), color = 'white') + scale_fill_viridis_c()
+
+MAzip3_to_RA <- read_excel("data/MAzip3-RA-crosswalk.xlsx")
+MAshp3 <- merge(MAshp2,MAzip3_to_RA,by="zip3") %>% dplyr::select(-c("do_union"))
+MAshp3 <- group_by(MAshp3,RA) %>% 
+  summarise(estimate=sum(estimate),do_union = TRUE) %>% 
+  fill_holes(threshold = units::set_units(200,km^2))
+#ggplot() + geom_sf(data = MAshp3, aes(fill = estimate), color = 'white') + scale_fill_viridis_c()
+
+rm(MAshp1585,MAshp,MAshp2,MAzip3_to_RA)
+```
+
+## NE Shapefile
+RELY ON ARCMAP SHAPEFILES, CONVERT TO R MULTIPOLYGON AND WRANGLE...
+NE DEPT OF NATURAL RESOURCES : https://dnr.nebraska.gov/data/boundaries
+
+```{r shapefile NE}
+NEshp <- st_read("data/ZipCodesSP_NE/ZipCodesSP.shp") %>%
+  dplyr::select(ZCTA5CE10,ALAND10,AWATER10,geometry)
+NEshp$group <- 1
+NEshp$zip3 <- substr(NEshp$ZCTA5CE10,1,3)
+NEshp$zip3 <- as.numeric(NEshp$zip3)
+
+NEshp$zip3[NEshp$zip3 == 570] <- 687
+NEshp$zip3[NEshp$zip3 == 515] <- 680
+NEshp$zip3[NEshp$zip3 == 665] <- 683
+NEshp$zip3[NEshp$zip3 == 807] <- 690
+NEshp$zip3[NEshp$zip3 == 820] <- 691
+
+NEzip3_to_RA <- read_excel("data/NEzip3-RA-crosswalk.xlsx")
+NEshp <- merge(NEshp,NEzip3_to_RA,by="zip3") 
+NEshp <- 
+  group_by(NEshp,RA) %>% 
+  summarise(estimate=sum(group),do_union = TRUE) %>% 
+  fill_holes(threshold = units::set_units(135,km^2))
+
+#ggplot() + geom_sf(data = NEshp, aes(fill = estimate), color = 'white')
+rm(NEzip3_to_RA)
+```
+
+
+## CA Harmonise and Edit
+```{r CA Harmonise and Edit}
+CAOrig <- othercounties %>% filter(state == "California")
+CALAOrig <- CAOrig %>% filter(GEOID == "06037")
+
+# County CALA file has wrong crs, NEED RESET AND REPROJECT
+# CALAshp1
+CALAshp1 <- st_transform(CALAshp1,st_crs(CAOrig)$epsg) 
+# Drop LA County and Merge Edited 
+CAOrig$geometry[CAOrig$GEOID == "06037"] <- CALAshp1$geometry[CALAshp1$ratingarea==15]
+CAOrig$county[CAOrig$GEOID == "06037"] <- "Los Angeles County - 15"
+CAOrig$GEOID[CAOrig$GEOID == "06037"] <- "0603715"
+
+CAmerge <- rbind(CAOrig,CALAOrig)
+CAmerge$geometry[CAmerge$GEOID == "06037"] <- CALAshp1$geometry[CALAshp1$ratingarea==16]
+CAOrig$county[CAOrig$GEOID == "06037"] <- "Los Angeles County - 16"
+CAmerge$GEOID[CAmerge$GEOID == "06037"] <- "0603716"
+
+othercounties <- filter(othercounties, state!="California")
+othercounties <- rbind(othercounties,CAmerge)
+rm(CAOrig,CALAOrig,CAmerge)
+```
+
+## Crosswalk & Validation Set-Up
+```{r Cross Walk and Quality Validation}
+
+df_validation_census <- 
+  data.frame(matrix(unlist(map(other, function(x) county_counteur(othercounties, x))),
+                    nrow = length(map(other, function(x) county_counteur(othercounties, x))),
+                    byrow = T))
+colnames(df_validation_census) <- c("state","NumCounty")
+df_validation_census <- df_validation_census[order(df_validation_census$state),]
+
+# Based on df above, construct reference matrix
+# Reference CMS Rating Area Page if needed : https://www.cms.gov/cciio/programs-and-initiatives/health-insurance-market-reforms/state-gra.html
+# Now simply take HPC county_to_RA_crosswalk, courtesy to Caroline and Erik
+
+here()
+county2RA <- read_excel("data/county_to_RA_crosswalk.xlsx")
+county2RA <- county2RA[complete.cases(county2RA),]
+county2RA$state <- trimws(gsub("[[:digit:]]","",county2RA$RatingRegion), which = c("right"))
+county2RA$ratingarea <- readr::parse_number(county2RA$RatingRegion)
+#Alaska
+county2RA$fcounty[county2RA$fipscode=="02270"] <- "Kusilvak, formerly Wade Hampton 02270"
+county2RA$fipscode[county2RA$fipscode=="02270"] <- "02158"
+#South Dakota
+county2RA$fcounty[county2RA$fipscode=="46113"] <- "Oglala Lakota County, formerly Shannon 46113"
+county2RA$fipscode[county2RA$fipscode=="46113"] <- "46102"
+#Virginia - Bedford city now in Bedford County
+county2RA <- filter(county2RA,fipscode!="51515")
+```
+
+## Function - Other States
+```{r Function}
+othercounties_factory <- function(df,name) {
+  statedata <- df %>% filter(state == name)
+  ref_state <- county2RA %>% filter(state == name)
+  if (name != "California") {
+    if (length(ref_state$fcounty) != length(unique(ref_state$fcounty))) {
+      stop("The County2RA reference file is wrong, examine and take care of duplicates or consistency between files.", call. = FALSE)
+    }
+    if (unlist(filter(df_validation_census,state==name)["NumCounty"])!=length(ref_state$fcounty)) {
+      stop(paste0("Check file consistency. The files may not have complete records for at least ", name),call. = FALSE)
+    }
+  } else {
+    if (length(ref_state$fcounty) != length(unique(ref_state$fcounty)) + 1) {
+      stop("The County2RA reference file is wrong, examine and take care of duplicates or consistency between files.", call. = FALSE)
+    }
+  }
+  if (unlist(filter(df_validation_census,state==name)["NumCounty"])!=length(ref_state$fcounty)) {
+    stop(paste0("Check file consistency. The files may not have complete records for at least ", name),call. = FALSE)
+  }
+  
+  statedata <- merge(statedata,dplyr::select(ref_state,-c("state")),
+                     by.x=c("GEOID"),by.y=c("fipscode"))
+  #print(dim(dplyr::select(statedata,-c("geometry")))[1])
+  #print(length(ref_state$fcounty))
+  #return(statedata)
+  
+  if (dim(dplyr::select(statedata,-c("geometry")))[1] != length(ref_state$fcounty)) {
+    stop(paste0("Need to examine merge. The merged file does not have the correct number of counties for ",name))
+    cat("\n")
+    message(paste0("Processed polygon data ", dim(dplyr::select(statedata,-c("geometry")))[1]))
+    cat("\n")
+    message(paste0("retrieved reference data ", length(ref_state$fcounty)))
+  }
+  statedata_merge <- group_by(statedata,ratingarea) %>% summarise(estimate = sum(estimate), do_union = TRUE)
+
+  statedata_merge <- statedata_merge %>% mutate(facet = "merged") %>% dplyr::select("ratingarea","estimate","facet","geometry")
+  statedata_unmerge <- statedata %>% dplyr::select(ratingarea,estimate) %>% mutate(facet = "unmerge")
+  statedata_output <- rbind(statedata_merge,statedata_unmerge)
+  statedata_output$state <- name
+  statedata_output <- statedata_output[c("state","ratingarea","facet","estimate","geometry")]
+  statedata_output$ratingarea <- as.factor(statedata_output$ratingarea)
+  return(statedata_output)
+  }
+```
+
+## Test & Debug
+```{r test and debug}
+#input_state <- "California"
+#test_output <- othercounties_factory(othercounties,input_state)
+#ggplot() + geom_sf(data = filter(test_output,facet=="merged"), aes(fill = ratingarea), color = 'white')
+
+#filtered <- filter(othercounties,state==input_state)
+#census_code <- unlist(as.list(data.frame(filter(othercounties, state==input_state))["GEOID"]),use.names = FALSE)
+#names_code <- unlist(as.list(filter(county2RA, state==input_state)["fipscode"]),use.names = FALSE)
+
+#intersect(census_code,names_code)
+#setdiff(census_code,names_code)
+#setdiff(names_code,census_code)
+
+#rm(filtered,census_code,names_code)
+```
+## HPC DATA
+```{r HPC DATA}
+hpc_data <- read_excel("data/medicaid_insurers_by_ra_2019_update.xlsx") %>% 
+  dplyr::select(-c("State Code"))
+colnames(hpc_data)[match("State",colnames(hpc_data))] <- "state"
+colnames(hpc_data)[match("Rating region",colnames(hpc_data))] <- "ratingarea"
+colnames(hpc_data)[!colnames(hpc_data) %in% c("state","ratingarea")]
+hpc_data <- hpc_data[c("state","ratingarea",
+                       colnames(hpc_data)[!colnames(hpc_data) %in% c("state","ratingarea")])]
+hpc_data$state <- as.factor(hpc_data$state)
+hpc_data$ratingarea <- as.factor(hpc_data$ratingarea)
+colnames(hpc_data) <- str_replace_all(colnames(hpc_data),c(" " = "_",","="","2019"="Y"))
+```
+
+## Assemble
+Assuming HPC DATA Would Come In A ready format that has 'State' and 'Rating region' as column
+
+```{r assemble 1}
+# only1
+# states that need to be merged from bespoke shapefiles
+special <- c("Alaska","Massachusetts","Nebraska")
+# California is still integrated into the list for other states
+other <- other[!other %in% special]
+
+MAshp3$do_union <- NULL
+colnames(MAshp3)[1] <- "ratingarea"
+MAshp3$facet <- "merged"
+MAshp3$state <- "Massachusetts"
+MAshp3 <- MAshp3[c("state","ratingarea","facet","estimate","geometry")]
+MAshp3 <- st_transform(MAshp3,st_crs(states))
+
+NEshp$do_union <- NULL
+colnames(NEshp)[1] <- "ratingarea"
+NEshp$facet <- "merged"
+NEshp$state <- "Nebraska"
+NEshp <- NEshp[c("state","ratingarea","facet","estimate","geometry")]
+NEshp <- st_transform(NEshp,st_crs(states))
+
+AKshp$do_union <- NULL
+colnames(AKshp)[1] <- "ratingarea"
+AKshp$facet <- "merged"
+AKshp$state <- "Alaska"
+AKshp <- AKshp[c("state","ratingarea","facet","estimate","geometry")]
+AKshp <- st_transform(AKshp,st_crs(states))
+
+```
+
+
+```{r crude assemble}
+#TO DO: ADD PATH FOR ALL STATES OR DEFAULT
+singlestatedata_factory <- function(name) {
+  if (name %in% only1) {
+    statedata_output <- only1data_factory(counties,name)    
+    
+  } else if (name %in% other) {
+    statedata_output <- othercounties_factory(othercounties,name)
+      
+  } else if (name %in% special) {
+    if (name == "Nebraska") {
+      statedata_output <- NEshp 
+    } else if (name == "Massachusetts") {
+      statedata_output <- MAshp3
+    } else if (name == "Alaska") {
+      statedata_output <- AKshp
+    } else {
+      stop("State Input Names are correct, but vector 'special' may be out of order... Abort.", call. = FALSE)
+    }
+    
+  } else {
+    stop("Your input name is out of order, suggest spelling validation", call. = FALSE)
+    
+  }
+  message(paste0("Completed Assembling State Data : ",name))
+  return(statedata_output)
+  }
+
+statedata_collecteur <- function(namelist) {
+  if (length(namelist)!=length(unique(namelist))) {
+    message("Your list has repeated elements, duplicates are deleted and the pipeline flows on from there...")
+    namelist <- unique(namelist)
+  }
+  
+  output <- singlestatedata_factory(namelist[1])
+  if (length(namelist) > 51) {
+    stop("Your input list has over 51 elements, check your input", call. = FALSE)
+    
+  } else if (length(namelist) > 1 ) {
+    for (i in 2:length(namelist)) {
+      output <- rbind(output,singlestatedata_factory(namelist[i]))
+    }
+  }
+  output$state <- as.factor(output$state)
+  output$ratingarea <- as.factor(output$ratingarea)
+  
+  return(output)
+  }
+
+
+testlist <- c("Alabama","Alaska","Arizona","Arkansas","California","Colorado","Connecticut","Delaware",
+              "District of Columbia","Florida","Georgia","Hawaii","Idaho","Illinois","Indiana","Iowa","Kansas",
+              "Kentucky","Louisiana","Maine","Maryland","Massachusetts","Michigan","Minnesota","Mississippi",
+              "Missouri","Montana","Nebraska","Nevada","New Hampshire","New Jersey","New Mexico","New York",
+              "North Carolina","North Dakota","Ohio","Oklahoma","Oregon","Pennsylvania","Rhode Island",
+              "South Carolina","South Dakota","Tennessee","Texas","Utah","Vermont","Virginia","Washington",
+              "West Virginia","Wisconsin","Wyoming")
+
+crudeassemble <- statedata_collecteur(testlist)
+
+testRW <- statedata_collecteur("Alabama")
+
+
+# MIdata <- statedata_collecteur("Michigan")
+# ggplot(filter(crudeassemble,facet=="merged")) + geom_sf(aes(fill=estimate),color='white')
+# ggplot(filter(MIdata,facet=="merged")) + geom_sf(aes(fill=estimate),color='white')
+```
+
+Shifting, Rotating and Scaling AK & HI in SF setting with transport_sf
+Tutorial based on ggcart example for moving Puerto Rico
+https://github.com/uncoast-unconf/ggcart/blob/master/README.Rmd
+
+Adopt Plotting Strategy from R-Spatial SF
+https://www.r-spatial.org/r/2018/10/25/ggplot2-sf-3.html
+
+
+```{r assemble}
+allra <- left_join(crudeassemble,hpc_data,by=c("state","ratingarea"))
+allra <- allra[order(allra$state,allra$ratingarea),]
+hpc_data_name <- colnames(allra)[!colnames(allra) %in% c("state","ratingarea","facet","estimate","geometry")]
+
+# Set Data Column
+datadim <- quo(!! sym(hpc_data_name[4]))
+
+Data_49 <- filter(allra,(state != "Alaska" & state != "Hawaii"))
+Data_AK <- filter(allra,state=="Alaska")
+Data_HI <- filter(allra,state=="Hawaii")
+
+# This methods automatically shifts, but renders shifted areas in Alaska appear disconnected on the map
+# ggplot() + geom_sf(data=filter(Data_49,facet=="merged"),aes(fill=as.factor(Y_Centene)),color='white') +
+  # geom_sf(data=transport_sf(sf=filter(Data_AK,facet=="merged"),shift = c(35, -35), scale = 0.8),aes(fill=as.factor(Y_Centene)),color='white') +
+  # geom_sf(data=transport_sf(sf=filter(Data_HI,facet=="merged"),shift = c(52, 5.5), scale = 1.25),aes(fill=as.factor(Y_Centene)),color='white') +
+  # coord_sf(xlim = c(-130, -60),ylim = c(20,50)) +
+  # coord_sf(projection = "albers",lat0=39, lat1 = 45)
+# ggsave(file="graph/harmonise.pdf")
+
+# Plotting 49 with correct projection
+Map49 <-
+  ggplot() + 
+    geom_sf(data = filter(Data_49,facet=="merged"),aes(fill=as.factor(eval(datadim))),color='white') +
+    coord_sf(crs = st_crs(2163),xlim = c(-2500000, 2500000),ylim = c(-2300000,730000),datum = NA)  +
+  scale_fill_manual(name = eval(datadim),values = c("#1696d2","#fdbf11"),labels = c("None","With Participating Insurers","NA")) +
+  theme(panel.background = element_rect(fill = "transparent",colour = NA),legend.position = "top")
+
+# Plotting Alaska Separately, Alaska Albers Projection CRS 3467
+MapAK <-
+  ggplot() + 
+    geom_sf(data = filter(Data_AK,facet=="merged"),aes(fill=as.factor(eval(datadim))),color='white',size=0.001) +
+    coord_sf(crs = st_crs(3467),xlim = c(-2400000, 1600000),ylim = c(200000,2500000),expand = FALSE, datum = NA) +
+    scale_fill_manual(values = c("#1696d2","#fdbf11"),na.value="#f5f5f5") +
+    theme(legend.position = "none",plot.margin=unit(c(0,0,0,0), "null"),
+          panel.background=element_rect(fill = "transparent",colour = NA))
+
+# Plotting Hawaii Separately, Old Hawaii Projection CRS 4135
+MapHI <-
+  ggplot() + 
+    geom_sf(data = filter(Data_HI,facet=="merged"),aes(fill=as.factor(eval(datadim))),color='white',size=0.05) +
+    coord_sf(crs = st_crs(4135),xlim = c(-161, -154),ylim = c(18,23),expand = FALSE, datum = NA) +
+    scale_fill_manual(values = c("#1696d2","#fdbf11")) +
+    theme(legend.position = "none",plot.margin=unit(c(0,0,0,0), "null"),
+          panel.background=element_rect(fill = "transparent",colour = NA))
+
+# Knit n Mold - through customised annotation option
+Map49 + 
+  annotation_custom(grob = ggplotGrob(MapAK),xmin = -2750000,xmax = -2750000 + (1550000 - (-2400000))/2,ymin = -2450000,ymax = -2450000 + (2000000 - 200000)/2) +
+  annotation_custom(grob = ggplotGrob(MapHI),xmin = -1250000,xmax = -1250000 + (-154 - (-164)) * 135000, ymin = -2450000,ymax = -2450000 + (23 - 18) * 135000)
+
+plotname <- paste0("RA Graph ",eval(datadim))
+filename <- paste0(paste0("graph/",plotname[2]),".pdf")
+ggsave(file=filename)
+
+```
