@@ -21,7 +21,7 @@ library(urbnthemes)
 ```
 
 ## Libraries
-```{r package}
+```{r package, results = "hide"}
 library(tidyr)
 #library(plyr)
 library(dplyr)
@@ -46,13 +46,13 @@ library(ggcart)
 Acquire your own API: https://api.census.gov/data/key_signup.html
 TidyCensus: https://cran.r-project.org/web/packages/tidycensus/tidycensus.pdf
 
-```{r API input}
+```{r API input, echo=FALSE}
 # census_api_key("99f5c6677acc3649e28ae06f33a5e99a23a688b2",install = TRUE)
 ```
 
 ## Census API Data
 Bespoke lines needed to address Kusilvak and Oglala, for cross walk with HPC RA level data
-```{r Census Data}
+```{r Census Data, results = "hide"}
 counties <- tidycensus::get_acs(geography = "county", variables = "B19013_001",
                                 geometry = TRUE) %>% arrange(NAME)
 counties$NAME_orig <- counties$NAME
@@ -85,7 +85,7 @@ Not fetching for VT, RI, NJ, HI, DC, DE; with only one rating area in state
 (https://www.cms.gov/cciio/programs-and-initiatives/health-insurance-market-reforms/state-gra.html)
 Need to take care of California, Nebraska, Massachusetts and Alaska separately
 
-```{r Set-up All Counties}
+```{r Set-up All Counties,results = "hide"}
 # Only 1
 only1 <- c("Vermont","Rhode Island","New Jersey","Hawaii",
            "District of Columbia","Delaware","New Hampshire")
@@ -122,7 +122,7 @@ othercounties <- filter(counties,!(state %in% only1))
 
 ## ESRI shp 3-DIGIT for AK
 3-digit area shapefiles from ESRI, only use for Alaska's boundaries
-```{r AK shapefile ESRI}
+```{r AK shapefile ESRI,results = "hide"}
 ESRIshp <- st_read("data/SHP3-digitESRI/Export_3DigitShpAK.shp") %>% 
   dplyr::select(ZIP3,STATE,Shape_Area,geometry)
 ESRIshp <- ESRIshp %>% filter(ZIP3 %in% c("000","995","996","997","998","999"))
@@ -158,7 +158,7 @@ Reference Zip Code Map in Los Angeles County : http://planning.lacounty.gov/asse
 Then because of the strange grouping for region 923 & 928 per CMS, we use map from CoveredCA:
 https://hbex.coveredca.com/toolkit/webinars-briefings/downloads/Regional-Staff-FINAL.pdf
 
-```{r shapefile CA LA}
+```{r shapefile CA LA, results = "hide"}
 CALAshp <- 
   st_read("data/ZipCode_CA_LACounty/CAMS_ZIPCODE_PARCEL_SPECIFIC/CAMS_ZIPCODE_PARCEL_SPECIFIC.shp") %>%
   dplyr::select(ZIPCODE,OBJECTID,geometry)
@@ -191,7 +191,7 @@ rm(CALAzip3_to_RA,CALAshp)
 RELY ON ARCMAP SHAPEFILES, CONVERT TO R MULTIPOLYGON AND WRANGLE...
 MASS GIS Pilot Data : https://docs.digital.mass.gov/dataset/massgis-data-zip-codes-5-digit-here-navteq
 
-```{r shapefile}
+```{r MA shapefile, results = "hide"}
 MAshp <- 
   st_read("data/zipcodes_MA/ZIPCODES_NT_POLY.shp") %>% dplyr::select(POSTCODE,PC_NAME,COUNTY,geometry)
 MAshp1585 <- MAshp %>%
@@ -219,7 +219,7 @@ rm(MAshp1585,MAshp,MAshp2,MAzip3_to_RA)
 RELY ON ARCMAP SHAPEFILES, CONVERT TO R MULTIPOLYGON AND WRANGLE...
 NE DEPT OF NATURAL RESOURCES : https://dnr.nebraska.gov/data/boundaries
 
-```{r shapefile NE}
+```{r shapefile NE,results = "hide"}
 NEshp <- st_read("data/ZipCodesSP_NE/ZipCodesSP.shp") %>%
   dplyr::select(ZCTA5CE10,ALAND10,AWATER10,geometry)
 NEshp$group <- 1
@@ -245,7 +245,7 @@ rm(NEzip3_to_RA)
 
 
 ## CA Harmonise and Edit
-```{r CA Harmonise and Edit}
+```{r CA Harmonise and Edit, results = "hide"}
 CAOrig <- othercounties %>% filter(state == "California")
 CALAOrig <- CAOrig %>% filter(GEOID == "06037")
 
@@ -268,7 +268,7 @@ rm(CAOrig,CALAOrig,CAmerge)
 ```
 
 ## Crosswalk & Validation Set-Up
-```{r Cross Walk and Quality Validation}
+```{r Cross Walk and Quality Validation, results = "hide"}
 
 df_validation_census <- 
   data.frame(matrix(unlist(map(other, function(x) county_counteur(othercounties, x))),
@@ -297,7 +297,7 @@ county2RA <- filter(county2RA,fipscode!="51515")
 ```
 
 ## Function - Other States
-```{r Function}
+```{r Function, results = "hide"}
 othercounties_factory <- function(df,name) {
   statedata <- df %>% filter(state == name)
   ref_state <- county2RA %>% filter(state == name)
@@ -343,7 +343,7 @@ othercounties_factory <- function(df,name) {
 ```
 
 ## Test & Debug
-```{r test and debug}
+```{r test and debug, results = "hide"}
 #input_state <- "California"
 #test_output <- othercounties_factory(othercounties,input_state)
 #ggplot() + geom_sf(data = filter(test_output,facet=="merged"), aes(fill = ratingarea), color = 'white')
@@ -375,7 +375,7 @@ colnames(hpc_data) <- str_replace_all(colnames(hpc_data),c(" " = "_",","="","201
 ## Assemble
 Assuming HPC DATA Would Come In A ready format that has 'State' and 'Rating region' as column
 
-```{r assemble 1}
+```{r assemble 1, results = "hide"}
 # only1
 # states that need to be merged from bespoke shapefiles
 special <- c("Alaska","Massachusetts","Nebraska")
@@ -466,9 +466,6 @@ testlist <- c("Alabama","Alaska","Arizona","Arkansas","California","Colorado","C
 
 crudeassemble <- statedata_collecteur(testlist)
 
-testRW <- statedata_collecteur("Alabama")
-
-
 # MIdata <- statedata_collecteur("Michigan")
 # ggplot(filter(crudeassemble,facet=="merged")) + geom_sf(aes(fill=estimate),color='white')
 # ggplot(filter(MIdata,facet=="merged")) + geom_sf(aes(fill=estimate),color='white')
@@ -488,7 +485,7 @@ allra <- allra[order(allra$state,allra$ratingarea),]
 hpc_data_name <- colnames(allra)[!colnames(allra) %in% c("state","ratingarea","facet","estimate","geometry")]
 
 # Set Data Column
-datadim <- quo(!! sym(hpc_data_name[4]))
+datadim <- quo(!! sym(hpc_data_name[1]))
 
 Data_49 <- filter(allra,(state != "Alaska" & state != "Hawaii"))
 Data_AK <- filter(allra,state=="Alaska")
@@ -533,8 +530,8 @@ Map49 +
   annotation_custom(grob = ggplotGrob(MapAK),xmin = -2750000,xmax = -2750000 + (1550000 - (-2400000))/2,ymin = -2450000,ymax = -2450000 + (2000000 - 200000)/2) +
   annotation_custom(grob = ggplotGrob(MapHI),xmin = -1250000,xmax = -1250000 + (-154 - (-164)) * 135000, ymin = -2450000,ymax = -2450000 + (23 - 18) * 135000)
 
-plotname <- paste0("RA Graph ",eval(datadim))
-filename <- paste0(paste0("graph/",plotname[2]),".pdf")
-ggsave(file=filename)
+# plotname <- paste0("RA Graph ",eval(datadim))
+# filename <- paste0(paste0("graph/",plotname[2]),".pdf")
+# ggsave(file=filename)
 
 ```
